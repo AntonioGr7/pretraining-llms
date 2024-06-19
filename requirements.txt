@@ -1,0 +1,5 @@
+datasets
+huggingface_hub
+python-dotenv==1.0.1
+tiktoken
+tqdm
