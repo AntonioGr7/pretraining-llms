@@ -35,5 +35,4 @@ plt.title('Train Loss vs Validation Loss')
 plt.legend()
 plt.grid(True)
 plt.savefig('log/train_vs_val_loss.png')
-
 plt.show()
