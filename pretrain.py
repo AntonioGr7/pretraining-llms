@@ -1,15 +1,13 @@
 import os
 import math
 import time
-import inspect
-from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from hellaswag import render_example, iterate_examples
 from datetime import datetime
 from dataloader import DataLoaderLite
-from model import GPT
+from model import GPT, GPTConfig
 import tiktoken
 import numpy as np
 from utils import load_tokens, get_most_likely_row
@@ -25,14 +23,12 @@ torch.set_float32_matmul_precision('high')
 # DDP launch for e.g. 8 GPUs:
 # torchrun --standalone --nproc_per_node=8 pretraining.py
 
-
+parser = argparse.ArgumentParser(description="Pretrain args command line parser")
 parser.add_argument('-lr', '--learning_rate', type=float, help="learning rate", default=6e-4)
+parser.add_argument('-d', '--device', type=str, help="device", default="cuda")
 
 args = parser.parse_args()
 
-device_type = "cuda" if device.startswith("cuda") else "cpu"
-
-# run the training loop
 
 # set up DDP (distributed data parallel).
 # torchrun command sets the env variables RANK, LOCAL_RANK, and WORLD_SIZE
@@ -61,7 +57,7 @@ else:
         device = "mps"
     print(f"using device: {device}")
 
-# added after video, pytorch can be serious about it's device vs. device_type distinction
+device_type = "cuda" if device.startswith("cuda") else "cpu"
 
 torch.manual_seed(1337)
 if torch.cuda.is_available():
@@ -71,11 +67,11 @@ enc = tiktoken.get_encoding("gpt2") #gpt-2-small is my smallest version
 
 B = 16 # micro batch size
 T = 1024 # sequence length
-accumulation_steps = 10
+accumulation_steps = 64
 total_batch_size = B*T*accumulation_steps #524288 # 2**19, ~0.5M, in number of tokens
-eval_step = 250
-sampling_step = 500
-checkpoint_steps = 250
+eval_step = 100
+sampling_step = 250
+checkpoint_steps = 100
 
 
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
@@ -84,14 +80,23 @@ if master_process:
     print(f"total desired batch size: {total_batch_size}")
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
-train_loader = DataLoaderLite(data_folder="dataset/uonlp/CulturaX",B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="train")
-val_loader = DataLoaderLite(data_folder="dataset/uonlp/CulturaX",B=B, T=T, process_rank=ddp_rank, num_processes=ddp_world_size, split="val")
-
-
-
+train_loader = DataLoaderLite(data_folder="dataset/uonlp/CulturaX",
+                            master_process=master_process,
+                            B=B, 
+                            T=T, 
+                            process_rank=ddp_rank, 
+                            num_processes=ddp_world_size, 
+                            split="train")
+val_loader = DataLoaderLite(data_folder="dataset/uonlp/CulturaX",
+                            master_process=master_process,
+                            B=B, 
+                            T=T, 
+                            process_rank=ddp_rank, 
+                            num_processes=ddp_world_size, 
+                            split="val")
 
 # create model
-model = GPT(GPTConfig(vocab_size=50304))
+model = GPT(GPTConfig(vocab_size=50304),master_process=master_process)
 # model = GPT.from_pretrained("gpt2") # or init from OpenAI GPT-2
 model.to(device)
 use_compile = False # torch.compile interferes with HellaSwag eval and Generation. TODO fix
@@ -109,7 +114,6 @@ epoch = 1
 max_steps = 2000*epoch # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 sampling_sentence = "Il vero significato della vita è"
 
-
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_steps:
@@ -122,6 +126,7 @@ def get_lr(it):
     assert 0 <= decay_ratio <= 1
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
     return min_lr + coeff * (max_lr - min_lr)
+
 
 # optimize!
 optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, learning_rate=max_lr, device_type=device_type)

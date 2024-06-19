@@ -1,7 +1,8 @@
-
+import os
+from utils import load_tokens
 
 class DataLoaderLite:
-    def __init__(self, data_folder, B, T, process_rank, num_processes, split):
+    def __init__(self, data_folder, master_process, B, T, process_rank, num_processes, split):
         self.B = B
         self.T = T
         self.process_rank = process_rank

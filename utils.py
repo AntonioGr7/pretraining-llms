@@ -1,4 +1,6 @@
-
+import numpy as np
+import torch
+from torch.nn import functional as F
 
 def load_tokens(filename):
     npt = np.load(filename)
@@ -28,3 +30,5 @@ def get_most_likely_row(tokens, mask, logits):
     # the one with the lowest loss should be the most likely
     pred_norm = avg_loss.argmin().item()
     return pred_norm
+
+
