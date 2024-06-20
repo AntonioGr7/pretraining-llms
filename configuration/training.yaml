@@ -1,0 +1,28 @@
+matmul_precision: "high"  # highest, high or medium
+device: "cuda:0" # cuda:n: cpu or mps
+training:
+  dataset_root_folder: "dataset/uonlp/CulturaX"
+  start_from_checkpoint: false
+  checkpoint: "logs/2024_06_20_08_48_12/model_00002.pt" # path of checkpoint
+  seed: 1234
+  micro_batch_size: 16
+  sequence_length: 1024
+  accumulation_steps: 64
+  use_torch_compile: false
+  max_lr: 6e-4
+  min_lr: 6e-3
+  weight_decay: 0.1
+  warmup_steps: 750
+  epoch: 1
+  max_steps: 5000
+evaluation:
+  eval_steps: 50
+  sampling: true
+  sampling_steps: 50
+  sampling_sentence: "Il significato della vita è "
+  num_sampling_sentences: 4
+  sampling_max_length: 50
+checkpoint:
+  checkpoint_steps: 100
+
+

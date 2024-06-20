@@ -14,20 +14,21 @@ from utils import load_tokens, get_most_likely_row
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
-import argparse
+import yaml
+from utils import load_yaml_config
+import logging
 
-torch.set_float32_matmul_precision('high')
+config = load_yaml_config('configuration/training.yaml')
+
+
+torch.set_float32_matmul_precision(config['matmul_precision'])
+log_dir = "logs"
+os.makedirs(log_dir, exist_ok=True)
 
 # simple launch:
 # python pretraining.py
 # DDP launch for e.g. 8 GPUs:
 # torchrun --standalone --nproc_per_node=8 pretraining.py
-
-parser = argparse.ArgumentParser(description="Pretrain args command line parser")
-parser.add_argument('-lr', '--learning_rate', type=float, help="learning rate", default=6e-4)
-parser.add_argument('-d', '--device', type=str, help="device", default="cuda")
-
-args = parser.parse_args()
 
 
 # set up DDP (distributed data parallel).
@@ -59,19 +60,41 @@ else:
 
 device_type = "cuda" if device.startswith("cuda") else "cpu"
 
-torch.manual_seed(1337)
-if torch.cuda.is_available():
-    torch.cuda.manual_seed(1337)
+
+seed = config['training']['seed']
+if seed is None:
+    logging.warning("The seed has not been set. Consider doing this if you want reproducible results.")
+else:
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
 
 enc = tiktoken.get_encoding("gpt2") #gpt-2-small is my smallest version
 
-B = 16 # micro batch size
-T = 1024 # sequence length
-accumulation_steps = 64
+
+B = config['training']['micro_batch_size'] # micro batch size
+T = config['training']['sequence_length'] # sequence length
+accumulation_steps = config['training']['accumulation_steps']
+start_from_checkpoint = config['training']['start_from_checkpoint']
 total_batch_size = B*T*accumulation_steps #524288 # 2**19, ~0.5M, in number of tokens
-eval_step = 100
-sampling_step = 250
-checkpoint_steps = 100
+
+eval_step = config['evaluation']['eval_steps']
+sampling = config['evaluation']['sampling']
+sampling_step = config['evaluation']['sampling_steps']
+if sampling_step:
+    try:
+        sampling_sentence = config['evaluation']['sampling_sentence']
+    except Exception as e:
+        logging.error("If you set sampling: true, sampling_sentence must be filled")
+        exit(-1)
+
+checkpoint_steps = int(config['checkpoint']['checkpoint_steps'])
+max_lr = float(config['training']['max_lr'])
+min_lr = float(config['training']['min_lr'])
+weight_decay = float(config['training']['weight_decay'])
+warmup_steps = float(config['training']['warmup_steps'])
+epoch = int(config['training']['epoch'])
+max_steps = int(config['training']['max_steps'])*epoch # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
 
 
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
@@ -80,39 +103,44 @@ if master_process:
     print(f"total desired batch size: {total_batch_size}")
     print(f"=> calculated gradient accumulation steps: {grad_accum_steps}")
 
-train_loader = DataLoaderLite(data_folder="dataset/uonlp/CulturaX",
+train_loader = DataLoaderLite(data_folder=config['training']['dataset_root_folder'],
                             master_process=master_process,
                             B=B, 
                             T=T, 
                             process_rank=ddp_rank, 
                             num_processes=ddp_world_size, 
                             split="train")
-val_loader = DataLoaderLite(data_folder="dataset/uonlp/CulturaX",
+val_loader = DataLoaderLite(data_folder=config['training']['dataset_root_folder'],
                             master_process=master_process,
                             B=B, 
                             T=T, 
                             process_rank=ddp_rank, 
                             num_processes=ddp_world_size, 
                             split="val")
-
+enc.n_vocab
 # create model
-model = GPT(GPTConfig(vocab_size=50304),master_process=master_process)
-# model = GPT.from_pretrained("gpt2") # or init from OpenAI GPT-2
+starting_step = 0
+model = GPT(GPTConfig(vocab_size=enc.n_vocab))
+if master_process:
+    model.master_process = master_process
+if start_from_checkpoint:
+    logging.info(f"Starting from checkpoint {config['training']['checkpoint']}")
+    state = torch.load(config['training']['checkpoint'],map_location=torch.device(device))
+    model.load_state_dict(state['model'])
+    starting_step = state['step']
+    logging.info(f"Moving to step: {starting_step}")
+    for s in range(0,starting_step):
+        train_loader.next_batch()
+
 model.to(device)
-use_compile = False # torch.compile interferes with HellaSwag eval and Generation. TODO fix
+use_compile = config['training']['use_torch_compile'] # torch.compile interferes with HellaSwag eval and Generation. TODO fix
 if use_compile:
     model = torch.compile(model)
 if ddp:
     model = DDP(model, device_ids=[ddp_local_rank])
 raw_model = model.module if ddp else model # always contains the "raw" unwrapped model
 
-max_lr = 6e-4 
-min_lr = max_lr * 0.1
-weight_decay = 0.1
-warmup_steps = 750
-epoch = 1
-max_steps = 2000*epoch # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
-sampling_sentence = "Il vero significato della vita è"
+
 
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
@@ -127,19 +155,21 @@ def get_lr(it):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff starts at 1 and goes to 0
     return min_lr + coeff * (max_lr - min_lr)
 
-
-# optimize!
 optimizer = raw_model.configure_optimizers(weight_decay=weight_decay, learning_rate=max_lr, device_type=device_type)
+if start_from_checkpoint:
+    optimizer.load_state_dict(state['optimizer_state_dict'])
+    
 
 # create the log directory we will write checkpoints to and log to
-log_dir = "log"
-os.makedirs(log_dir, exist_ok=True)
 timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+log_dir = f"logs/{timestamp}"
+os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, f"{timestamp}_log.txt")
 with open(log_file, "w") as f: # open for writing to clear the file
     pass
 
-for step in range(max_steps):
+
+for step in range(starting_step,max_steps):
     t0 = time.time()
     last_step = (step == max_steps - 1)
 
@@ -163,21 +193,25 @@ for step in range(max_steps):
             print(f"validation loss: {val_loss_accum.item():.4f}")
             with open(log_file, "a") as f:
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-            if step > 0 and (step % checkpoint_steps == 0 or last_step):
-                # optionally write model checkpoints
-                checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
-                checkpoint = {
-                    'model': raw_model.state_dict(),
-                    'config': raw_model.config,
-                    'step': step,
-                    'val_loss': val_loss_accum.item()
-                }
-                # you might also want to add optimizer.state_dict() and
-                # rng seeds etc., if you wanted to more exactly resume training
-                torch.save(checkpoint, checkpoint_path)
+    # -----------------------------------------------------------------------------------------------------------------------
+    # Save checkpoint step
+    if step > 0 and (step % checkpoint_steps == 0 or last_step):
+        # optionally write model checkpoints
+        checkpoint_path = os.path.join(log_dir, f"model_{step:05d}.pt")
+        checkpoint = {
+            'model': raw_model.state_dict(),
+            'config': raw_model.config,
+            'step': step,
+            'loss': loss.item(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'val_loss': val_loss_accum.item()
+        }
+        # you might also want to add optimizer.state_dict() and
+        # rng seeds etc., if you wanted to more exactly resume training
+        torch.save(checkpoint, checkpoint_path)
 
     # once in a while evaluate hellaswag
-    if (step % eval_step == 0 or last_step) and (not use_compile):
+    '''if (step % eval_step == 0 or last_step) and (not use_compile):
         num_correct_norm = 0
         num_total = 0
         for i, example in enumerate(iterate_examples("val")):
@@ -207,19 +241,20 @@ for step in range(max_steps):
         if master_process:
             print(f"HellaSwag accuracy: {num_correct_norm}/{num_total}={acc_norm:.4f}")
             with open(log_file, "a") as f:
-                f.write(f"{step} hella {acc_norm:.4f}\n")
+                f.write(f"{step} hella {acc_norm:.4f}\n")'''
 
-    # once in a while generate from the model (except step 0, which is noise)
-    if ((step > 0 and step % sampling_step == 0) or last_step) and (not use_compile):
+    # -----------------------------------------------------------------------------------------------------------------------
+    # Sampling step
+    if sampling and ((step > 0 and step % sampling_step == 0) or last_step) and (not use_compile):
         model.eval()
-        num_return_sequences = 4
-        max_length = 32
+        num_return_sequences = int(config['evaluation']['num_sampling_sentences'])
+        max_length = int(config['evaluation']['sampling_max_length'])
         tokens = enc.encode(sampling_sentence)
         tokens = torch.tensor(tokens, dtype=torch.long)
         tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
         xgen = tokens.to(device)
         sample_rng = torch.Generator(device=device)
-        sample_rng.manual_seed(42 + ddp_rank)
+        sample_rng.manual_seed(10 + ddp_rank)
         while xgen.size(1) < max_length:
             # forward the model to get the logits
             with torch.no_grad():

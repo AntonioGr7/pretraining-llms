@@ -8,7 +8,6 @@ def load_tokens(filename):
     ptt = torch.tensor(npt, dtype=torch.long)
     return ptt
 
-
 # helper function for HellaSwag eval
 # takes tokens, mask, and logits, returns the index of the completion with the lowest loss
 
@@ -32,3 +31,11 @@ def get_most_likely_row(tokens, mask, logits):
     return pred_norm
 
 
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+import yaml
+
+def load_yaml_config(file_path):
+    with open(file_path, 'r') as file:
+        config = yaml.safe_load(file)
+    return config
