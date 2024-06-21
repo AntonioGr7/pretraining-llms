@@ -82,8 +82,8 @@ def read_txt_files_ordered(folder_path):
     for file, _ in file_times:
         file_path = os.path.join(folder_path, file)
         with open(file_path, 'r') as f:
-            content = f.read()
-        ordered_contents.append((file, content))
+            content = f.readlines()
+        ordered_contents.extend(content)
     
     return ordered_contents
 
