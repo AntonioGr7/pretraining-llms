@@ -1,3 +1,4 @@
 dataset
 logs
 .env
+__pycache__
