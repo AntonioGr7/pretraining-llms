@@ -10,7 +10,7 @@ from dataloader import DataLoaderLite
 from model import GPT, GPTConfig
 import tiktoken
 import numpy as np
-from utils import load_tokens, get_most_likely_row
+from utils import load_tokens, get_most_likely_row, get_next_log_file
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
@@ -160,11 +160,15 @@ if start_from_checkpoint:
     optimizer.load_state_dict(state['optimizer_state_dict'])
     
 
-# create the log directory we will write checkpoints to and log to
-timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-log_dir = f"logs/{timestamp}"
+if start_from_checkpoint:
+    log_dir = config['training']['checkpoint'][1]
+else:
+    log_dir = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+
+log_dir = f"logs/{log_dir}"
 os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, f"{timestamp}_log.txt")
+log_name = get_next_log_file(log_dir)
+log_file = os.path.join(log_dir, f"{log_name}")
 with open(log_file, "w") as f: # open for writing to clear the file
     pass
 

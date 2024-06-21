@@ -34,8 +34,57 @@ def get_most_likely_row(tokens, mask, logits):
 # --------------------------------------------------------------------------------------------------------------------------------------------------------------
 
 import yaml
+import os
+import re
 
 def load_yaml_config(file_path):
     with open(file_path, 'r') as file:
         config = yaml.safe_load(file)
     return config
+
+
+def get_next_log_file(directory):
+    # List all files in the directory
+    files_in_directory = os.listdir(directory)
+
+    # Filter files that match the pattern 'log_<number>.txt'
+    log_files = [file for file in files_in_directory if re.match(r'^log_\d+\.txt$', file)]
+
+    # Extract the numeric part of the filenames
+    log_numbers = [int(re.search(r'(\d+)', file).group()) for file in log_files]
+
+    # Determine the highest number
+    if log_numbers:
+        max_number = max(log_numbers)
+    else:
+        max_number = 0
+
+    # Create the next log file name
+    next_log_file = f'log_{max_number + 1}.txt'
+    return next_log_file
+
+def read_txt_files_ordered(folder_path):
+    # Get all .txt files in the folder
+    txt_files = [f for f in os.listdir(folder_path) if f.endswith('.txt')]
+    
+    # Create a list of tuples (file_name, creation_time)
+    file_times = []
+    for file in txt_files:
+        file_path = os.path.join(folder_path, file)
+        creation_time = os.path.getctime(file_path)
+        file_times.append((file, creation_time))
+    
+    # Sort the list based on creation time
+    file_times.sort(key=lambda x: x[1])
+    
+    # Read and store the content of each file in order
+    ordered_contents = []
+    for file, _ in file_times:
+        file_path = os.path.join(folder_path, file)
+        with open(file_path, 'r') as f:
+            content = f.read()
+        ordered_contents.append((file, content))
+    
+    return ordered_contents
+
+# --------------------------------------------------------------------------------------------------------------------------------------------------------------
